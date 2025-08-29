@@ -6,6 +6,8 @@ name = "pypi"
 [packages]
 zipfile2 = "*"
 requests = "*"
+pyside6 = "==6.9.2"
+pyinstaller = "==6.15.0"
 
 [dev-packages]
 
