@@ -8,6 +8,8 @@ zipfile2 = "*"
 requests = "*"
 pyside6 = "==6.9.2"
 pyinstaller = "==6.15.0"
+pywin32 = "*"
+pywin32-ctypes = "*"
 
 [dev-packages]
 
