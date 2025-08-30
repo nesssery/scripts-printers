@@ -3,14 +3,12 @@ import time
 import json
 from zipfile import ZipFile
 import win32print
-import win32api
+import subprocess
 from PySide6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QPushButton, QTextEdit, QLabel
 from PySide6.QtCore import QThread, Signal
 import sys
 import shutil
 import re
-import win32con
-import winreg
 
 # Configuration
 WATCH_FOLDER = r"C:\Temp\print_jobs"
@@ -19,6 +17,7 @@ OUTPUT_FOLDER = r"C:\Temp\print_output"
 CHECK_INTERVAL = 5
 LOG_FILE = r"C:\Temp\logs\output.log"
 ERROR_LOG_FILE = r"C:\Temp\logs\error.log"
+SUMATRA_PATH = r"C:\Program Files\SumatraPDF\SumatraPDF.exe"  # Chemin vers SumatraPDF
 PRINTERS = {
     "facture_A4": "EPSON L3250 Series",
     "ticket_thermique": "XP-80C"  # À mettre à jour avec le nom exact après vérification
@@ -84,7 +83,10 @@ class WorkerThread(QThread):
                             file_content = facture_file.read()
                             printer_name = PRINTERS.get("facture_A4")
                             if printer_name and self.is_printer_available(printer_name):
-                                self.print_pdf(file_content, printer_name, order_id)
+                                if self.is_printer_ready(printer_name):
+                                    self.print_pdf(file_content, printer_name, order_id)
+                                else:
+                                    self.error_signal.emit(f"L'imprimante {printer_name} n'est pas prête.")
                             else:
                                 self.error_signal.emit(f"Imprimante {printer_name} non disponible ou non configurée.")
                     elif file_name.startswith("ticket_") and file_name.endswith(".json"):
@@ -96,42 +98,36 @@ class WorkerThread(QThread):
                                           f"\n{'='*20}"
                             printer_name = PRINTERS.get("ticket_thermique")
                             if printer_name and self.is_printer_available(printer_name):
-                                self.print_text(ticket_text.encode('utf-8'), printer_name)
+                                if self.is_printer_ready(printer_name):
+                                    self.print_text(ticket_text.encode('utf-8'), printer_name)
+                                else:
+                                    self.error_signal.emit(f"L'imprimante {printer_name} n'est pas prête.")
                             else:
                                 self.error_signal.emit(f"Imprimante {printer_name} non disponible ou non configurée.")
         except Exception as e:
             self.error_signal.emit(f"Erreur lors du traitement du ZIP : {e}")
 
-    def check_pdf_association(self):
-        try:
-            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, ".pdf") as key:
-                return winreg.QueryValueEx(key, "")[0] is not None
-        except Exception:
-            return False
-
     def print_pdf(self, file_content, printer_name, order_id):
         try:
-            # Vérifier l'association des fichiers .pdf
-            if not self.check_pdf_association():
-                self.error_signal.emit("Aucune application associée aux fichiers .pdf. Veuillez installer Adobe Acrobat Reader.")
-                return
-            # Vérifier l'état de l'imprimante
-            if not self.is_printer_ready(printer_name):
-                self.error_signal.emit(f"L'imprimante {printer_name} n'est pas prête (hors ligne, erreur, ou non connectée).")
+            # Vérifier si SumatraPDF est installé
+            if not os.path.exists(SUMATRA_PATH):
+                self.error_signal.emit(f"SumatraPDF non trouvé à {SUMATRA_PATH}. Installez SumatraPDF.")
                 return
             # Sauvegarder le PDF temporairement
             temp_pdf_path = os.path.join(OUTPUT_FOLDER, f"facture_{order_id}.pdf")
             with open(temp_pdf_path, 'wb') as temp_file:
                 temp_file.write(file_content)
-            # Imprimer via ShellExecute
-            win32api.ShellExecute(0, "print", temp_pdf_path, f'/d:"{printer_name}"', ".", win32con.SW_HIDE)
-            self.log_signal.emit(f"Impression PDF envoyée à {printer_name}: {temp_pdf_path}")
+            # Imprimer via SumatraPDF
+            cmd = f'"{SUMATRA_PATH}" -print-to "{printer_name}" -silent "{temp_pdf_path}"'
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            if result.returncode == 0:
+                self.log_signal.emit(f"Impression PDF envoyée à {printer_name}: {temp_pdf_path}")
+            else:
+                self.error_signal.emit(f"Erreur lors de l'impression PDF sur {printer_name}: {result.stderr}")
             # Supprimer le fichier temporaire
             os.remove(temp_pdf_path)
-        except win32api.error as e:
-            self.error_signal.emit(f"Erreur lors de l'impression PDF sur {printer_name} : Code {e.winerror} - {e.strerror}")
         except Exception as e:
-            self.error_signal.emit(f"Erreur générale lors de l'impression PDF sur {printer_name} : {e}")
+            self.error_signal.emit(f"Erreur lors de l'impression PDF sur {printer_name} : {e}")
 
     def print_text(self, file_content, printer_name):
         try:
@@ -179,8 +175,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Print Watcher")
         self.setGeometry(100, 100, 600, 400)
-
-        # Mise en page et widgets
         layout = QVBoxLayout()
         self.status_label = QLabel("Statut : Arrêté")
         self.log_text = QTextEdit()
@@ -188,22 +182,16 @@ class MainWindow(QMainWindow):
         self.start_button = QPushButton("Démarrer la surveillance")
         self.stop_button = QPushButton("Arrêter la surveillance")
         self.stop_button.setEnabled(False)
-
         layout.addWidget(self.status_label)
         layout.addWidget(self.log_text)
         layout.addWidget(self.start_button)
         layout.addWidget(self.stop_button)
-
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
-
-        # Thread de travail
         self.worker = WorkerThread()
         self.worker.log_signal.connect(self.append_log)
         self.worker.error_signal.connect(self.append_error)
-
-        # Connexion des boutons
         self.start_button.clicked.connect(self.start_watching)
         self.stop_button.clicked.connect(self.stop_watching)
 
@@ -243,10 +231,8 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     try:
         import win32print
-        import win32api
-        import winreg
     except ImportError:
-        print("Erreur : Les modules 'pywin32', 'win32api' ou 'winreg' ne sont pas installés. Installez-les avec 'pip install pywin32'.")
+        print("Erreur : Le module 'pywin32' n'est pas installé. Installez-le avec 'pip install pywin32'.")
         sys.exit(1)
     app = QApplication(sys.argv)
     window = MainWindow()
