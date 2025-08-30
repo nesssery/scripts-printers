@@ -3,43 +3,26 @@ import time
 import json
 from zipfile import ZipFile
 import win32print
-import subprocess
 from PySide6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QPushButton, QTextEdit, QLabel
 from PySide6.QtCore import QThread, Signal
 import sys
 import shutil
 import re
-import glob
+from pdf2image import convert_from_bytes
+from PIL import Image
+import io
 
 # Configuration
 WATCH_FOLDER = r"C:\Temp\print_jobs"
-DOWNLOADS_FOLDER = r"C:\Users\USER\Downloads"
+DOWNLOADS_FOLDER = r"C:\Users\aissi\Downloads"
 OUTPUT_FOLDER = r"C:\Temp\print_output"
 CHECK_INTERVAL = 5
 LOG_FILE = r"C:\Temp\logs\output.log"
 ERROR_LOG_FILE = r"C:\Temp\logs\error.log"
 PRINTERS = {
     "facture_A4": "EPSON L3250 Series",
-    "ticket_thermique": "Xprinter XP-80C"  # À vérifier avec EnumPrinters
+    "ticket_thermique": "Xprinter XP-80C"
 }
-
-# Trouver le chemin d'Adobe Acrobat Reader
-def find_acrobat_path():
-    possible_paths = [
-        r"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
-        r"C:\Program Files (x86)\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe",
-        r"C:\Program Files (x86)\Adobe\Acrobat Reader\Reader\AcroRd32.exe"
-    ]
-    for path in possible_paths:
-        if os.path.exists(path):
-            return path
-    # Recherche dynamique
-    for root, _, files in os.walk(r"C:\Program Files"):
-        if "AcroRd32.exe" in files or "Acrobat.exe" in files:
-            return os.path.join(root, "AcroRd32.exe" if "AcroRd32.exe" in files else "Acrobat.exe")
-    return None
-
-ACROBAT_PATH = find_acrobat_path()
 
 # Créer les dossiers s'ils n'existent pas
 for path in [WATCH_FOLDER, OUTPUT_FOLDER, os.path.dirname(LOG_FILE)]:
@@ -60,7 +43,6 @@ class WorkerThread(QThread):
         self.log_signal.emit("Surveillance démarrée.")
         while self.running:
             try:
-                # Vérifier Téléchargements
                 if os.path.exists(DOWNLOADS_FOLDER):
                     for file in os.listdir(DOWNLOADS_FOLDER):
                         if file.endswith(".zip") and re.match(r'^order_\d+\.zip$', file):
@@ -70,7 +52,6 @@ class WorkerThread(QThread):
                                 shutil.move(source_path, dest_path)
                                 self.log_signal.emit(f"Fichier déplacé : {file}")
                                 self.process_zip(dest_path)
-                # Vérifier WATCH_FOLDER
                 for file in os.listdir(WATCH_FOLDER):
                     if file.endswith(".zip") and re.match(r'^order_\d+\.zip$', file):
                         file_path = os.path.join(WATCH_FOLDER, file)
@@ -109,19 +90,22 @@ class WorkerThread(QThread):
 
     def print_pdf(self, file_content, printer_name, order_id):
         try:
-            if not ACROBAT_PATH:
-                self.error_signal.emit("Adobe Acrobat Reader non trouvé. Installez-le.")
+            images = convert_from_bytes(file_content)
+            if not images:
+                self.error_signal.emit("Erreur : Aucun contenu dans le PDF.")
                 return
-            temp_pdf_path = os.path.join(OUTPUT_FOLDER, f"facture_{order_id}.pdf")
-            with open(temp_pdf_path, 'wb') as temp_file:
-                temp_file.write(file_content)
-            cmd = f'"{ACROBAT_PATH}" /n /t "{temp_pdf_path}" "{printer_name}"'
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            if result.returncode == 0:
-                self.log_signal.emit(f"PDF imprimé sur {printer_name}")
-            else:
-                self.error_signal.emit(f"Erreur d'impression PDF : {result.stderr}")
-            os.remove(temp_pdf_path)
+            temp_image_path = os.path.join(OUTPUT_FOLDER, f"facture_{order_id}.png")
+            images[0].save(temp_image_path, "PNG")
+            hPrinter = win32print.OpenPrinter(printer_name)
+            hJob = win32print.StartDocPrinter(hPrinter, 1, ("Facture", None, "RAW"))
+            win32print.StartPagePrinter(hPrinter)
+            with open(temp_image_path, 'rb') as img_file:
+                win32print.WritePrinter(hPrinter, img_file.read())
+            win32print.EndPagePrinter(hPrinter)
+            win32print.EndDocPrinter(hPrinter)
+            win32print.ClosePrinter(hPrinter)
+            self.log_signal.emit(f"PDF (image) imprimé sur {printer_name}")
+            os.remove(temp_image_path)
         except Exception as e:
             self.error_signal.emit(f"Erreur d'impression PDF : {e}")
 
@@ -202,8 +186,10 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     try:
         import win32print
-    except ImportError:
-        print("Erreur : Installez 'pywin32' avec 'pip install pywin32'.")
+        import pdf2image
+        import PIL
+    except ImportError as e:
+        print(f"Erreur : Module manquant. Installez avec 'pip install {e.name}'.")
         sys.exit(1)
     app = QApplication(sys.argv)
     window = MainWindow()
