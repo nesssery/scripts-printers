@@ -9,6 +9,7 @@ from PySide6.QtCore import QThread, Signal
 import sys
 import shutil
 import re
+import win32con
 
 # Configuration
 WATCH_FOLDER = r"C:\Temp\print_jobs"
@@ -102,15 +103,29 @@ class WorkerThread(QThread):
 
     def print_pdf(self, file_content, printer_name, order_id):
         try:
+            # Vérifier l'association des fichiers .pdf
+            import win32con
+            import win32api
+            try:
+                win32api.ShellExecute(0, "open", "test.pdf", None, ".", win32con.SW_HIDE)
+            except win32api.error as e:
+                if e.winerror == win32con.SE_ERR_NOASSOC:
+                    self.error_signal.emit("Aucune application associée aux fichiers .pdf. Veuillez installer Adobe Acrobat Reader.")
+                    return
             # Sauvegarder le PDF temporairement
             temp_pdf_path = os.path.join(OUTPUT_FOLDER, f"facture_{order_id}.pdf")
             with open(temp_pdf_path, 'wb') as temp_file:
                 temp_file.write(file_content)
             # Imprimer via ShellExecute
-            win32api.ShellExecute(0, "print", temp_pdf_path, f'/d:"{printer_name}"', ".", 0)
+            win32api.ShellExecute(0, "print", temp_pdf_path, f'/d:"{printer_name}"', ".", win32con.SW_HIDE)
             self.log_signal.emit(f"Impression PDF envoyée à {printer_name}: {temp_pdf_path}")
             # Supprimer le fichier temporaire
             os.remove(temp_pdf_path)
+        except win32api.error as e:
+            if e.winerror == win32con.SE_ERR_NOASSOC:
+                self.error_signal.emit("Aucune application associée aux fichiers .pdf. Veuillez installer Adobe Acrobat Reader.")
+            else:
+                self.error_signal.emit(f"Erreur lors de l'impression PDF sur {printer_name} : {e}")
         except Exception as e:
             self.error_signal.emit(f"Erreur lors de l'impression PDF sur {printer_name} : {e}")
 
