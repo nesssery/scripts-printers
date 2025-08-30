@@ -9,7 +9,8 @@ from PySide6.QtCore import QThread, Signal
 import sys
 import shutil
 import re
-import subprocess
+import win32con
+import winreg
 
 # Configuration
 WATCH_FOLDER = r"C:\Temp\print_jobs"
@@ -19,11 +20,11 @@ CHECK_INTERVAL = 5
 LOG_FILE = r"C:\Temp\logs\output.log"
 ERROR_LOG_FILE = r"C:\Temp\logs\error.log"
 PRINTERS = {
-    "facture_A4": "EPSON L3250 Series",   # ⚠️ mettre le NOM EXACT vu dans EnumPrinters
-    "ticket_thermique": "XP-80C"          # ⚠️ idem ici
+    "facture_A4": "EPSON L3250 Series",
+    "ticket_thermique": "XP-80C"  # À mettre à jour avec le nom exact après vérification
 }
 
-# Créer les dossiers nécessaires
+# Créer les dossiers s'ils n'existent pas
 for path in [WATCH_FOLDER, OUTPUT_FOLDER, os.path.dirname(LOG_FILE)]:
     if not os.path.exists(path):
         os.makedirs(path)
@@ -40,14 +41,12 @@ class WorkerThread(QThread):
         self.running = True
         processed_files = set()
         self.log_signal.emit(f"Surveillance démarrée. Vérification du dossier : {WATCH_FOLDER}")
-
         while self.running:
             try:
                 if not os.path.exists(WATCH_FOLDER):
                     self.error_signal.emit(f"Dossier {WATCH_FOLDER} introuvable.")
                     time.sleep(CHECK_INTERVAL)
                     continue
-
                 # Vérifier les nouveaux fichiers ZIP dans Téléchargements
                 if os.path.exists(DOWNLOADS_FOLDER):
                     for file in os.listdir(DOWNLOADS_FOLDER):
@@ -60,7 +59,6 @@ class WorkerThread(QThread):
                                 self.log_signal.emit(f"Fichier déplacé : {file} vers {WATCH_FOLDER}")
                                 self.process_zip(dest_path)
                                 processed_files.remove(dest_path)
-
                 # Vérifier les fichiers ZIP dans WATCH_FOLDER
                 for file in os.listdir(WATCH_FOLDER):
                     if file.endswith(".zip") and re.match(r'^order_\d+\.zip$', file):
@@ -71,10 +69,8 @@ class WorkerThread(QThread):
                             processed_files.add(file_path)
                             os.remove(file_path)
                             processed_files.remove(file_path)
-
             except Exception as e:
                 self.error_signal.emit(f"Erreur dans la surveillance : {e}")
-
             time.sleep(CHECK_INTERVAL)
 
     def process_zip(self, zip_path):
@@ -91,7 +87,6 @@ class WorkerThread(QThread):
                                 self.print_pdf(file_content, printer_name, order_id)
                             else:
                                 self.error_signal.emit(f"Imprimante {printer_name} non disponible ou non configurée.")
-
                     elif file_name.startswith("ticket_") and file_name.endswith(".json"):
                         self.log_signal.emit(f"Traitement de {file_name}")
                         with zip_file.open(file_name) as ticket_file:
@@ -107,32 +102,38 @@ class WorkerThread(QThread):
         except Exception as e:
             self.error_signal.emit(f"Erreur lors du traitement du ZIP : {e}")
 
-    def print_pdf(self, file_content, printer_name, order_id):
-        """Impression PDF via SumatraPDF en mode silencieux"""
+    def check_pdf_association(self):
         try:
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, ".pdf") as key:
+                return winreg.QueryValueEx(key, "")[0] is not None
+        except Exception:
+            return False
+
+    def print_pdf(self, file_content, printer_name, order_id):
+        try:
+            # Vérifier l'association des fichiers .pdf
+            if not self.check_pdf_association():
+                self.error_signal.emit("Aucune application associée aux fichiers .pdf. Veuillez installer Adobe Acrobat Reader.")
+                return
+            # Vérifier l'état de l'imprimante
+            if not self.is_printer_ready(printer_name):
+                self.error_signal.emit(f"L'imprimante {printer_name} n'est pas prête (hors ligne, erreur, ou non connectée).")
+                return
+            # Sauvegarder le PDF temporairement
             temp_pdf_path = os.path.join(OUTPUT_FOLDER, f"facture_{order_id}.pdf")
             with open(temp_pdf_path, 'wb') as temp_file:
                 temp_file.write(file_content)
-
-            # Chemin vers SumatraPDF (doit être installé)
-            sumatra_path = r"C:\Program Files\SumatraPDF\SumatraPDF.exe"
-
-            if not os.path.exists(sumatra_path):
-                self.error_signal.emit("SumatraPDF non trouvé. Installez-le et mettez à jour le chemin.")
-                return
-
-            # Commande silencieuse pour impression directe
-            cmd = f'"{sumatra_path}" -print-to "{printer_name}" -silent "{temp_pdf_path}"'
-            subprocess.run(cmd, shell=True)
-
+            # Imprimer via ShellExecute
+            win32api.ShellExecute(0, "print", temp_pdf_path, f'/d:"{printer_name}"', ".", win32con.SW_HIDE)
             self.log_signal.emit(f"Impression PDF envoyée à {printer_name}: {temp_pdf_path}")
+            # Supprimer le fichier temporaire
             os.remove(temp_pdf_path)
-
+        except win32api.error as e:
+            self.error_signal.emit(f"Erreur lors de l'impression PDF sur {printer_name} : Code {e.winerror} - {e.strerror}")
         except Exception as e:
-            self.error_signal.emit(f"Erreur lors de l'impression PDF sur {printer_name} : {e}")
+            self.error_signal.emit(f"Erreur générale lors de l'impression PDF sur {printer_name} : {e}")
 
     def print_text(self, file_content, printer_name):
-        """Impression brute (RAW) sur imprimante thermique"""
         try:
             hPrinter = win32print.OpenPrinter(printer_name)
             hJob = win32print.StartDocPrinter(hPrinter, 1, ("Impression de ticket", None, "RAW"))
@@ -155,6 +156,21 @@ class WorkerThread(QThread):
             self.error_signal.emit(f"Erreur lors de la vérification des imprimantes : {e}")
             return False
 
+    def is_printer_ready(self, printer_name):
+        try:
+            hPrinter = win32print.OpenPrinter(printer_name)
+            printer_info = win32print.GetPrinter(hPrinter, 2)
+            win32print.ClosePrinter(hPrinter)
+            status = printer_info['Status']
+            if status == 0:
+                self.log_signal.emit(f"L'imprimante {printer_name} est prête.")
+                return True
+            self.error_signal.emit(f"État de l'imprimante {printer_name} : {status} (non prête).")
+            return False
+        except Exception as e:
+            self.error_signal.emit(f"Erreur lors de la vérification de l'état de l'imprimante {printer_name} : {e}")
+            return False
+
     def stop(self):
         self.running = False
 
@@ -164,6 +180,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Print Watcher")
         self.setGeometry(100, 100, 600, 400)
 
+        # Mise en page et widgets
         layout = QVBoxLayout()
         self.status_label = QLabel("Statut : Arrêté")
         self.log_text = QTextEdit()
@@ -181,10 +198,12 @@ class MainWindow(QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
 
+        # Thread de travail
         self.worker = WorkerThread()
         self.worker.log_signal.connect(self.append_log)
         self.worker.error_signal.connect(self.append_error)
 
+        # Connexion des boutons
         self.start_button.clicked.connect(self.start_watching)
         self.stop_button.clicked.connect(self.stop_watching)
 
@@ -222,6 +241,13 @@ class MainWindow(QMainWindow):
             self.append_log("La surveillance est déjà arrêtée.")
 
 if __name__ == "__main__":
+    try:
+        import win32print
+        import win32api
+        import winreg
+    except ImportError:
+        print("Erreur : Les modules 'pywin32', 'win32api' ou 'winreg' ne sont pas installés. Installez-les avec 'pip install pywin32'.")
+        sys.exit(1)
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
