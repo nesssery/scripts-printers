@@ -9,19 +9,37 @@ from PySide6.QtCore import QThread, Signal
 import sys
 import shutil
 import re
+import glob
 
 # Configuration
 WATCH_FOLDER = r"C:\Temp\print_jobs"
-DOWNLOADS_FOLDER = r"C:\Users\aissi\Downloads"
+DOWNLOADS_FOLDER = r"C:\Users\USER\Downloads"
 OUTPUT_FOLDER = r"C:\Temp\print_output"
 CHECK_INTERVAL = 5
 LOG_FILE = r"C:\Temp\logs\output.log"
 ERROR_LOG_FILE = r"C:\Temp\logs\error.log"
-ACROBAT_PATH = r"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe"  # Chemin vers Adobe Acrobat Reader
 PRINTERS = {
     "facture_A4": "EPSON L3250 Series",
     "ticket_thermique": "Xprinter XP-80C"  # À vérifier avec EnumPrinters
 }
+
+# Trouver le chemin d'Adobe Acrobat Reader
+def find_acrobat_path():
+    possible_paths = [
+        r"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
+        r"C:\Program Files (x86)\Adobe\Acrobat Reader DC\Reader\AcroRd32.exe",
+        r"C:\Program Files (x86)\Adobe\Acrobat Reader\Reader\AcroRd32.exe"
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    # Recherche dynamique
+    for root, _, files in os.walk(r"C:\Program Files"):
+        if "AcroRd32.exe" in files or "Acrobat.exe" in files:
+            return os.path.join(root, "AcroRd32.exe" if "AcroRd32.exe" in files else "Acrobat.exe")
+    return None
+
+ACROBAT_PATH = find_acrobat_path()
 
 # Créer les dossiers s'ils n'existent pas
 for path in [WATCH_FOLDER, OUTPUT_FOLDER, os.path.dirname(LOG_FILE)]:
@@ -91,15 +109,12 @@ class WorkerThread(QThread):
 
     def print_pdf(self, file_content, printer_name, order_id):
         try:
-            # Vérifier Adobe Acrobat Reader
-            if not os.path.exists(ACROBAT_PATH):
-                self.error_signal.emit(f"Adobe Acrobat Reader non trouvé à {ACROBAT_PATH}. Installez-le.")
+            if not ACROBAT_PATH:
+                self.error_signal.emit("Adobe Acrobat Reader non trouvé. Installez-le.")
                 return
-            # Sauvegarder le PDF
             temp_pdf_path = os.path.join(OUTPUT_FOLDER, f"facture_{order_id}.pdf")
             with open(temp_pdf_path, 'wb') as temp_file:
                 temp_file.write(file_content)
-            # Imprimer via Adobe Acrobat Reader
             cmd = f'"{ACROBAT_PATH}" /n /t "{temp_pdf_path}" "{printer_name}"'
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             if result.returncode == 0:
