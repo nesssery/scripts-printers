@@ -3,15 +3,16 @@ import time
 import json
 from zipfile import ZipFile
 import win32print
+import win32api
 from PySide6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QPushButton, QTextEdit, QLabel
-from PySide6.QtCore import QThread, Signal, Qt, QDir
+from PySide6.QtCore import QThread, Signal
 import sys
 import shutil
-import re  # Ajout pour utiliser les expressions régulières
+import re
 
 # Configuration
-WATCH_FOLDER = r"C:\Temp\print_jobs"  # Destination finale
-DOWNLOADS_FOLDER = r"C:\Users\aissi\Downloads"  # Remplace <TonNom> par ton nom d'utilisateur Windows
+WATCH_FOLDER = r"C:\Temp\print_jobs"
+DOWNLOADS_FOLDER = r"C:\Users\aissi\Downloads"
 OUTPUT_FOLDER = r"C:\Temp\print_output"
 CHECK_INTERVAL = 5
 LOG_FILE = r"C:\Temp\logs\output.log"
@@ -21,7 +22,7 @@ PRINTERS = {
     "ticket_thermique": "XP-80C"
 }
 
-# Crée les dossiers s'ils n'existent pas
+# Créer les dossiers s'ils n'existent pas
 for path in [WATCH_FOLDER, OUTPUT_FOLDER, os.path.dirname(LOG_FILE)]:
     if not os.path.exists(path):
         os.makedirs(path)
@@ -44,20 +45,21 @@ class WorkerThread(QThread):
                     self.error_signal.emit(f"Dossier {WATCH_FOLDER} introuvable.")
                     time.sleep(CHECK_INTERVAL)
                     continue
-                # Vérifie les nouveaux fichiers téléchargés dans Downloads
-                for file in os.listdir(DOWNLOADS_FOLDER):
-                    if file.endswith(".zip") and re.match(r'^order_\d+\.zip$', file):  # Filtre pour order_<nombre>.zip
-                        source_path = os.path.join(DOWNLOADS_FOLDER, file)
-                        dest_path = os.path.join(WATCH_FOLDER, file)
-                        if not os.path.exists(dest_path):  # Évite les doublons
-                            shutil.move(source_path, dest_path)
-                            processed_files.add(dest_path)
-                            self.log_signal.emit(f"Fichier déplacé : {file} vers {WATCH_FOLDER}")
-                            self.process_zip(dest_path)
-                            processed_files.remove(dest_path)
-                # Vérifie les fichiers déjà dans WATCH_FOLDER
+                # Vérifier les nouveaux fichiers ZIP dans Téléchargements
+                if os.path.exists(DOWNLOADS_FOLDER):
+                    for file in os.listdir(DOWNLOADS_FOLDER):
+                        if file.endswith(".zip") and re.match(r'^order_\d+\.zip$', file):
+                            source_path = os.path.join(DOWNLOADS_FOLDER, file)
+                            dest_path = os.path.join(WATCH_FOLDER, file)
+                            if not os.path.exists(dest_path):
+                                shutil.move(source_path, dest_path)
+                                processed_files.add(dest_path)
+                                self.log_signal.emit(f"Fichier déplacé : {file} vers {WATCH_FOLDER}")
+                                self.process_zip(dest_path)
+                                processed_files.remove(dest_path)
+                # Vérifier les fichiers ZIP dans WATCH_FOLDER
                 for file in os.listdir(WATCH_FOLDER):
-                    if file.endswith(".zip") and re.match(r'^order_\d+\.zip$', file):  # Filtre pour order_<nombre>.zip
+                    if file.endswith(".zip") and re.match(r'^order_\d+\.zip$', file):
                         file_path = os.path.join(WATCH_FOLDER, file)
                         if file_path not in processed_files:
                             self.log_signal.emit(f"Nouveau fichier ZIP détecté : {file}")
@@ -80,10 +82,11 @@ class WorkerThread(QThread):
                             file_content = facture_file.read()
                             printer_name = PRINTERS.get("facture_A4")
                             if printer_name and self.is_printer_available(printer_name):
-                                self.print_to_printer(file_content, printer_name)
+                                self.print_pdf(file_content, printer_name, order_id)
                             else:
                                 self.error_signal.emit(f"Imprimante {printer_name} non disponible ou non configurée.")
                     elif file_name.startswith("ticket_") and file_name.endswith(".json"):
+                        self.log_signal.emit(f"Traitement de {file_name}")
                         with zip_file.open(file_name) as ticket_file:
                             ticket_data = json.load(ticket_file)
                             ticket_text = f"Ticket #{order_id}\n{'='*20}\n" + \
@@ -91,24 +94,38 @@ class WorkerThread(QThread):
                                           f"\n{'='*20}"
                             printer_name = PRINTERS.get("ticket_thermique")
                             if printer_name and self.is_printer_available(printer_name):
-                                self.print_to_printer(ticket_text.encode('utf-8'), printer_name)
+                                self.print_text(ticket_text.encode('utf-8'), printer_name)
                             else:
                                 self.error_signal.emit(f"Imprimante {printer_name} non disponible ou non configurée.")
         except Exception as e:
             self.error_signal.emit(f"Erreur lors du traitement du ZIP : {e}")
 
-    def print_to_printer(self, file_content, printer_name):
+    def print_pdf(self, file_content, printer_name, order_id):
+        try:
+            # Sauvegarder le PDF temporairement
+            temp_pdf_path = os.path.join(OUTPUT_FOLDER, f"facture_{order_id}.pdf")
+            with open(temp_pdf_path, 'wb') as temp_file:
+                temp_file.write(file_content)
+            # Imprimer via ShellExecute
+            win32api.ShellExecute(0, "print", temp_pdf_path, f'/d:"{printer_name}"', ".", 0)
+            self.log_signal.emit(f"Impression PDF envoyée à {printer_name}: {temp_pdf_path}")
+            # Supprimer le fichier temporaire
+            os.remove(temp_pdf_path)
+        except Exception as e:
+            self.error_signal.emit(f"Erreur lors de l'impression PDF sur {printer_name} : {e}")
+
+    def print_text(self, file_content, printer_name):
         try:
             hPrinter = win32print.OpenPrinter(printer_name)
-            hJob = win32print.StartDocPrinter(hPrinter, 1, ("Impression", None, "RAW"))
+            hJob = win32print.StartDocPrinter(hPrinter, 1, ("Impression de ticket", None, "RAW"))
             win32print.StartPagePrinter(hPrinter)
             win32print.WritePrinter(hPrinter, file_content)
             win32print.EndPagePrinter(hPrinter)
             win32print.EndDocPrinter(hPrinter)
             win32print.ClosePrinter(hPrinter)
-            self.log_signal.emit(f"Impression envoyée avec succès à {printer_name}")
+            self.log_signal.emit(f"Impression texte envoyée à {printer_name}")
         except Exception as e:
-            self.error_signal.emit(f"Erreur lors de l'impression sur {printer_name} : {e}")
+            self.error_signal.emit(f"Erreur lors de l'impression texte sur {printer_name} : {e}")
 
     def is_printer_available(self, printer_name):
         try:
@@ -126,7 +143,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Print Watcher")
         self.setGeometry(100, 100, 600, 400)
 
-        # Layout and widgets
+        # Mise en page et widgets
         layout = QVBoxLayout()
         self.status_label = QLabel("Statut : Arrêté")
         self.log_text = QTextEdit()
@@ -144,12 +161,12 @@ class MainWindow(QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
 
-        # Worker thread
+        # Thread de travail
         self.worker = WorkerThread()
         self.worker.log_signal.connect(self.append_log)
         self.worker.error_signal.connect(self.append_error)
 
-        # Connect buttons
+        # Connexion des boutons
         self.start_button.clicked.connect(self.start_watching)
         self.stop_button.clicked.connect(self.stop_watching)
 
@@ -179,7 +196,7 @@ class MainWindow(QMainWindow):
     def stop_watching(self):
         if self.worker.isRunning():
             self.worker.stop()
-            self.worker.wait()  # Attend que le thread se termine
+            self.worker.wait()
             self.status_label.setText("Statut : Arrêté")
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
@@ -187,6 +204,12 @@ class MainWindow(QMainWindow):
             self.append_log("La surveillance est déjà arrêtée.")
 
 if __name__ == "__main__":
+    try:
+        import win32print
+        import win32api
+    except ImportError:
+        print("Erreur : Les modules 'pywin32' ou 'win32api' ne sont pas installés. Installez-les avec 'pip install pywin32'.")
+        sys.exit(1)
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
