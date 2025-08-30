@@ -9,6 +9,7 @@ from PySide6.QtCore import QThread, Signal
 import sys
 import shutil
 import re
+import win32con
 
 # Configuration
 WATCH_FOLDER = r"C:\Temp\print_jobs"
@@ -19,7 +20,7 @@ LOG_FILE = r"C:\Temp\logs\output.log"
 ERROR_LOG_FILE = r"C:\Temp\logs\error.log"
 PRINTERS = {
     "facture_A4": "EPSON L3250 Series",
-    "ticket_thermique": "XP-80C"
+    "ticket_thermique": "XP-80C"  # À mettre à jour avec le nom exact après vérification
 }
 
 # Créer les dossiers s'ils n'existent pas
@@ -106,22 +107,26 @@ class WorkerThread(QThread):
             temp_pdf_path = os.path.join(OUTPUT_FOLDER, f"facture_{order_id}.pdf")
             with open(temp_pdf_path, 'wb') as temp_file:
                 temp_file.write(file_content)
-            # Vérifier si une application est associée aux fichiers .pdf
+            # Vérifier l'association des fichiers .pdf
             try:
-                win32api.ShellExecute(0, "open", temp_pdf_path, None, ".", 0)
+                win32api.ShellExecute(0, "open", temp_pdf_path, None, ".", win32con.SW_HIDE)
                 self.log_signal.emit(f"PDF ouvert avec succès pour vérification : {temp_pdf_path}")
             except win32api.error as e:
-                if e.winerror == 1155:  # SE_ERR_NOASSOC
+                if e.winerror == 1155:  # Code erreur pour absence d'association
                     self.error_signal.emit("Aucune application associée aux fichiers .pdf. Veuillez installer Adobe Acrobat Reader.")
                     return
                 raise
+            # Vérifier l'état de l'imprimante
+            if not self.is_printer_ready(printer_name):
+                self.error_signal.emit(f"L'imprimante {printer_name} n'est pas prête (hors ligne, erreur, ou non connectée).")
+                return
             # Imprimer via ShellExecute
-            win32api.ShellExecute(0, "print", temp_pdf_path, f'/d:"{printer_name}"', ".", 0)
+            win32api.ShellExecute(0, "print", temp_pdf_path, f'/d:"{printer_name}"', ".", win32con.SW_HIDE)
             self.log_signal.emit(f"Impression PDF envoyée à {printer_name}: {temp_pdf_path}")
             # Supprimer le fichier temporaire
             os.remove(temp_pdf_path)
         except win32api.error as e:
-            self.error_signal.emit(f"Erreur lors de l'impression PDF sur {printer_name} : {e}")
+            self.error_signal.emit(f"Erreur lors de l'impression PDF sur {printer_name} : Code {e.winerror} - {e.strerror}")
         except Exception as e:
             self.error_signal.emit(f"Erreur générale lors de l'impression PDF sur {printer_name} : {e}")
 
@@ -146,6 +151,20 @@ class WorkerThread(QThread):
             return printer_name in printer_names
         except Exception as e:
             self.error_signal.emit(f"Erreur lors de la vérification des imprimantes : {e}")
+            return False
+
+    def is_printer_ready(self, printer_name):
+        try:
+            hPrinter = win32print.OpenPrinter(printer_name)
+            printer_info = win32print.GetPrinter(hPrinter, 2)
+            win32print.ClosePrinter(hPrinter)
+            status = printer_info['Status']
+            if status == 0:  # 0 indique que l'imprimante est prête
+                return True
+            self.error_signal.emit(f"État de l'imprimante {printer_name} : {status} (non prête).")
+            return False
+        except Exception as e:
+            self.error_signal.emit(f"Erreur lors de la vérification de l'état de l'imprimante {printer_name} : {e}")
             return False
 
     def stop(self):
@@ -221,8 +240,9 @@ if __name__ == "__main__":
     try:
         import win32print
         import win32api
+        import win32con
     except ImportError:
-        print("Erreur : Les modules 'pywin32' ou 'win32api' ne sont pas installés. Installez-les avec 'pip install pywin32'.")
+        print("Erreur : Les modules 'pywin32', 'win32api' ou 'win32con' ne sont pas installés. Installez-les avec 'pip install pywin32'.")
         sys.exit(1)
     app = QApplication(sys.argv)
     window = MainWindow()
